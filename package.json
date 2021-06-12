@@ -1,0 +1,25 @@
+{
+  "name": "git_test",
+  "version": "1.0.0",
+  "description": "this is test directory to learn Git and Node",
+  "main": "index.html",
+  "scripts": {
+    "start": "npm run lite",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lite":"lite-server"
+
+  },
+  "author": "Bhagesh",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhagesh1298/Git-test.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bhagesh1298/Git-test/issues"
+  },
+  "homepage": "https://github.com/bhagesh1298/Git-test#readme",
+  "devDependencies": {
+    "lite-server": "^2.6.1"
+  }
+}
