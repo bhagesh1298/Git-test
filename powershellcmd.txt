@@ -1,0 +1,626 @@
+[12:14] Ajay Kakkar
+
+$groupname = "upl-okta-uplanalytics"
+
+#$groupname = "SG-Okta-Office365"
+
+ 
+
+$Output = [System.Collections.Generic.List[pscustomobject]]::new()
+
+ 
+
+$GroupSearcher = New-Object DirectoryServices.DirectorySearcher
+
+ 
+
+$GroupSearcher.Filter = "(&(objectCategory=group)(cn=$groupname))"
+
+ 
+
+$ADGroupInfo = $GroupSearcher.FindOne()
+
+ 
+
+$Searcher = New-Object DirectoryServices.DirectorySearcher
+
+ 
+
+$Searcher.Filter = "(&(objectCategory=Person)(sAMAccountName=*)(memberOf=$($ADGroupInfo.Properties.distinguishedname)))"
+
+ 
+
+$Searcher.PageSize = 5000
+
+ 
+
+$Members = $Searcher.FindAll()   
+
+ 
+
+write-host Searching for $Searcher.Filter..Found members in group $Members.Count... -ForegroundColor Green
+
+ 
+
+foreach ($Member in $Members) {
+
+ 
+
+    $info = [pscustomobject]@{
+
+ 
+
+    "Name"           = $Member.Properties["Name"][0]
+
+ 
+
+    "objectClass"    = $Member.Properties["objectClass"] -join ','
+
+ 
+
+    "SamAccountName" = $Member.Properties["SamAccountName"][0]
+
+ 
+
+    "Email"           = $Member.Properties["mail"][0]
+
+ 
+
+    "Group"          = $groupname
+
+ 
+
+    "OwnerFull"      = $ADGroupInfo.Properties["managedby"][0]
+
+ 
+
+    "Owner"          = if ($ADGroupInfo.Properties["managedby"][0]-ne $null) 
+
+                            {
+
+                                $ADGroupInfo.Properties["managedby"][0].Split(',')[0].split('=')[1]
+
+                            }
+
+                        else {
+
+                                $ADGroupInfo.Properties["managedby"][0]
+
+                             }
+
+    }
+
+ 
+
+    $Output.Add($info)
+
+}
+
+ 
+
+$Output | Export-CSV -Path “C:\Qlik_CLI_OutputFiles\oktaGroupMembersListOutput.csv” -NoTypeInformation -Encoding UTF8
+
+ 
+
+write-host GroupInfo Exported into path C:\Qlik_CLI_OutputFiles\oktaGroupMembersListOutput.csv -ForegroundColor Green
+
+ 
+
+$config=Get-Content -Path C:\Qlik_cli_script\Config.json -Raw | ConvertFrom-Json
+
+ 
+
+$context = $config.context
+
+$tenant = $config.tenanturl
+
+$tenantid = $config.tenantId
+
+ 
+
+qlik context use $context
+
+ 
+
+<#
+
+1. if user is not available in AD group, but avaialble in Qlik 
+
+
+    Change ownership of Apps, Automation to User running the script (Store output in CSV - Reference is QAA)
+
+    Unassign the license 
+
+	delete the user 
+
+#>
+
+ 
+
+$outfile = "C:\Qlik_CLI_OutputFiles\CurrentUserList.csv"
+
+ 
+
+$new_users = qlik user ls --limit  5000 --fields email 2>$null | ConvertFrom-Json
+
+$new_users.email | out-file $outfile
+
+ 
+
+$filedata = import-csv $outfile -Header Email  
+
+$filedata | export-csv $outfile -NoTypeInformation
+
+ 
+
+$CurrentUserList = Import-CSV C:\Qlik_CLI_OutputFiles\CurrentUserList.csv | Group-Object -AsHashTable -AsString -Property 'Email'
+
+$UserList = Import-CSV C:\Qlik_CLI_OutputFiles\oktaGroupMembersListOutput.csv | Group-Object -AsHashTable -AsString -Property 'Email'
+
+ 
+
+$Random = Get-Random
+
+ 
+
+$TobeDeletedUserlist = [System.Collections.Generic.List[pscustomobject]]::new()
+
+ 
+
+ForEach ($UserEmail in $CurrentUserList.Values) {
+
+    if (!$UserList[$UserEmail.Email]) {
+
+
+        $userfilter = 'email eq \"' + $UserEmail.Email + '\"'
+
+        $userid = (qlik.exe user ls --filter $userfilter --json 2>$null | Out-String |ConvertFrom-Json).id
+
+ 
+
+        $info = [pscustomobject]@{
+
+            "UserEmail" = $UserEmail.Email
+
+            "UserID"    = $userid
+
+        }
+
+        $TobeDeletedUserlist.Add($info)
+
+    }
+
+    else
+
+    {
+
+        write-host $UserEmail.Email present in both Okta group and Qlik Saas
+
+    }
+
+
+}
+
+ 
+
+ 
+
+$TobeDeletedUserlist | Export-CSV -Path “C:\Qlik_CLI_OutputFiles\TobeDeletedUserlist.csv” -NoTypeInformation -Encoding UTF8
+
+write-host GroupInfo Exported into path C:\Qlik_CLI_OutputFiles\TobeDeletedUserlist.csv -ForegroundColor Green
+
+ 
+
+$TobeDeletedUserlist = Import-Csv -Path “C:\Qlik_CLI_OutputFiles\TobeDeletedUserlist.csv”
+
+ 
+
+ 
+
+<#
+
+ForEach ($deletionUser in $TobeDeletedUserlist)
+
+{
+
+    $deletionUserID = $deletionUser.UserID
+
+    $deletionUserEmail = $deletionUser.UserEmail
+
+ 
+
+    $currentuser = qlik.exe user me --json 2>$null | ConvertFrom-Json
+
+    $currentuserID = $currentuser.id
+
+ 
+
+    $applist = qlik.exe app ls --ownerId $deletionUserID --limit 100 --json --verbose 2>$null | ConvertFrom-Json
+
+ 
+
+    if($applist.count -gt 0)
+
+    {
+
+        ForEach ($app in $applist){
+
+            $ChangeOwner = qlik.exe app owner $app.resourceId --ownerId $currentuserID 2>$null
+
+            Write-Host Changing ownership of App Id $app.id from $deletionUser.UserEmail to $currentuser.email -ForegroundColor Green
+
+        }
+
+    }
+
+ 
+
+    $automationfilter = 'ownerId eq \"' + $deletionUserID + '\"'
+
+    $automationlist = qlik automation ls --filter $automationfilter --limit 100 --json --verbose 2>$null | ConvertFrom-Json
+
+    If($automationlist.count -gt 0)
+
+    {
+
+        ForEach ($automation in $automationlist){
+
+            $ChangeAutomationOwner = qlik.exe automation move $automation.id --userId $currentuserID 2>$null
+
+            Write-Host Changing ownership of Automation Id $automation.id from $deletionUser.UserEmail to $currentuser.email -ForegroundColor Green
+
+        }
+
+    }
+
+
+    $Licensefilter = 'userId eq \"' + $deletionUserID + '\"' 
+
+
+    $licensedetails = qlik license assignment ls --filter $Licensefilter --json 2>$null | ConvertFrom-Json
+
+ 
+
+    if($licensedetails.type.Length -gt 0)
+
+    {
+
+        $userjson = @{subject="$($licensedetails.subject)";Type="$($licensedetails.type)"} | ConvertTo-Json -Compress
+
+ 
+
+        $json = "[$userjson]"
+
+ 
+
+        $paramjson = $json -replace """", "\"""
+
+ 
+
+        $licenseremoval = qlik.exe license assignment delete --delete "$paramjson" 2>$null 
+
+
+        Write-Host Removing License assignment $licensedetails.type for $deletionUserEmail -ForegroundColor Green
+
+    }
+
+ 
+
+    $userdeletion = qlik user rm $deletionUserID 2>$null
+
+ 
+
+    Write-Host Deleting user $deletionUserEmail -ForegroundColor Green
+
+ 
+
+}
+
+#>
+
+ 
+
+<#		
+
+2. if user is available in AD group, but not avaialble in Qlik 
+
+	Create the user Id using Email Id from Group 
+
+	Assign license 
+
+#>
+
+$outfile = "C:\Qlik_CLI_OutputFiles\CurrentUserList.csv"
+
+ 
+
+$new_users = qlik user ls --limit  5000 --fields email 2>$null | ConvertFrom-Json
+
+$new_users.email | out-file $outfile
+
+ 
+
+$filedata = import-csv $outfile -Header Email  
+
+$filedata | export-csv $outfile -NoTypeInformation
+
+ 
+
+$CurrentUserList = Import-CSV C:\Qlik_CLI_OutputFiles\CurrentUserList.csv | Group-Object -AsHashTable -AsString -Property 'Email'
+
+$UserList = Import-CSV C:\Qlik_CLI_OutputFiles\oktaGroupMembersListOutput.csv | Group-Object -AsHashTable -AsString -Property 'Email'
+
+ 
+
+$TobeCreatedUserlist = [System.Collections.Generic.List[pscustomobject]]::new()
+
+ 
+
+ForEach ($UserEmail in $UserList.Values) {
+
+    if (!$CurrentUserList[$UserEmail.Email]) {
+
+
+        $info = [pscustomobject]@{
+
+            "UserEmail" = $UserEmail.Email
+
+            "UserName"    = $UserEmail.Name
+
+        }
+
+        $TobeCreatedUserlist.Add($info)
+
+    }
+
+    else
+
+    {
+
+        write-host $UserEmail.Email present in both Okta group and Qlik Saas
+
+    }
+
+
+}
+
+ 
+
+ 
+
+$TobeCreatedUserlist | Export-CSV -Path “C:\Qlik_CLI_OutputFiles\TobeCreatedUserlist.csv” -NoTypeInformation -Encoding UTF8
+
+write-host GroupInfo Exported into path C:\Qlik_CLI_OutputFiles\TobeCreatedUserlist.csv -ForegroundColor Green
+
+ 
+
+$TobeCreatedUserlist = Import-CSV -path “C:\Qlik_CLI_OutputFiles\TobeCreatedUserlist.csv”
+
+ 
+
+ForEach ($UserDetails in $TobeCreatedUserlist) {
+
+ 
+
+    $Random = Get-Random
+
+    $License = "analyzer"
+
+ 
+
+    $user = qlik user create --email $UserDetails.UserEmail --name $UserDetails.UserName --subject $Random --tenantId  $tenantid  2>$null   
+
+
+   if($user.length -gt 0)
+
+    {
+
+        Write-Host user $UserDetails.UserEmail created No Roles Assigned -ForegroundColor Green
+
+ 
+
+        $userjson = @{subject="$Random";Type="$License"} | ConvertTo-Json -Compress
+
+ 
+
+        $json = "[$userjson]"
+
+ 
+
+        $paramjson = $json -replace """", "\"""
+
+
+        $license = qlik license assignment add --add "$paramjson" 2>$null | ConvertFrom-Json 2>$null
+
+ 
+
+        Write-Host license type "$License" assigned for user $UserDetails.UserEmail -ForegroundColor Yellow  
+
+    }
+
+    else
+
+    {
+
+        Write-Host Error Creating user $UserDetails.UserEmail -ForegroundColor Red
+
+    }
+
+ 
+
+}
+
+ 
+
+<#
+
+ 
+
+# To delete the license of the users in the Pending Login List
+
+ 
+
+$AnalyzerAssignment = qlik.exe license assignment ls --limit 5000 2>$null |ConvertFrom-Json 2>$null 
+
+$Pending = $AnalyzerAssignment|Where-Object {$null -eq $_.userid}
+
+$NotPending = $AnalyzerAssignment|Where-Object {$null -ne $_.userid}
+
+ 
+
+foreach ($pendingloginuser in $Pending)
+
+{
+
+    $userjson = @{subject=$pendingloginuser.subject;Type=$pendingloginuser.type} | ConvertTo-Json -Compress
+
+    $json = "[$userjson]"
+
+    $paramjson = $json -replace """", "\"""
+
+    $license = qlik license assignment delete --delete "$paramjson" 2>$null | ConvertFrom-Json 2>$null
+
+    Write-Host license type $pendingloginuser.type deleted for user $pendingloginuser.name -ForegroundColor Yellow 
+
+}
+
+ 
+
+#>
+qlik license assignment update --update "[{\"subject\":\"auth0^|681401379f37d4962c0fed48e43feceff139c5e5a8bbd951cd03f1639e01b40b\",\"type\":\"analyzer\",\"sourceType\":\"professional\"}]"
+
+
+qlik license assignment update --update "[{\"sourceType\":\"professional\",\"subject\":\"WIN-6JM34CM4A22\\auditor\",\"type\":\"analyzer\"}]"
+ 
+
+# To assign license to the unassigned users
+
+ 
+
+$assignment.Count = qlik.exe license assignment ls --limit 5000 2>$null | ConvertFrom-Json;
+
+$Users = qlik.exe user ls --limit 5000 2>$null |ConvertFrom-Json 
+
+$Unlicensed = $Users|?{-not $($_.subject -in $assignment.subject)};
+
+$licenseRequest = $Unlicensed |Select-Object -Property name,subject,@{name='userId';e={$_.id}},@{name='type';e={'analyzer'}};
+
+ 
+
+foreach ($unlicenseduser in $Unlicensed)
+
+{
+
+    $userjson = @{subject=$unlicenseduser.subject;Type="analyzer"} | ConvertTo-Json -Compress
+
+    $json = "[$userjson]"
+
+    $paramjson = $json -replace """", "\"""
+
+    $license = qlik license assignment add --add "$paramjson" 2>$null | ConvertFrom-Json 2>$null
+
+    Write-Host license type "$License" assigned for user $unlicenseduser.email -ForegroundColor Yellow 
+
+}
+
+ 
+
+ 
+
+ 
+
+<#  Old Logic for pending login deletion and assigning license to unassigned users
+
+ 
+
+# To delete the license of the users in the Pending Login List
+
+ 
+
+$AnalyzerAssignment = qlik.exe license assignment ls --limit 5000 2>$null |ConvertFrom-Json 2>$null 
+
+$Pending = $AnalyzerAssignment|Where-Object {$null -eq $_.userid}
+
+$NotPending = $AnalyzerAssignment|Where-Object {$null -ne $_.userid}
+
+ 
+
+$chunkSize = 50;
+
+$subGroups =[System.Collections.Generic.List[PSCustomObject[]]]::new()
+
+$parts = [math]::Ceiling($Pending.Length / $chunkSize)
+
+for($i=0; $i -lt $parts; $i++){    
+
+$start = $i*$chunkSize;    
+
+$end = (($i+1)*$chunkSize)-1;    
+
+$subGroups.Add($Pending[$start..$end])}
+
+Foreach($subpending in $subGroups){
+
+ 
+
+ 
+
+#$subPending = $Pending|Out-GridView -OutputMode Multiple -Title "Select Assignments to remove"
+
+$SelectedJson = $(ConvertTo-Json -InputObject ([PSCustomObject[]]($SubPending|Select-Object -Property subject,type)) -Compress)
+
+$SelectedJson = $SelectedJson -replace '"','\"'
+
+qlik.exe license assignment delete --delete $($SelectedJson) 2>$null 
+
+}
+
+ 
+
+# To assign license to the unassigned users
+
+ 
+
+$assignment = qlik.exe license assignment ls --limit 5000 2>$null | ConvertFrom-Json;
+
+$Users = qlik.exe user ls --limit 5000 2>$null |ConvertFrom-Json 
+
+$Unlicensed = $Users|?{-not $($_.subject -in $assignment.subject)};
+
+$licenseRequest = $Unlicensed |Select-Object -Property name,subject,@{name='userId';e={$_.id}},@{name='type';e={'analyzer'}};
+
+ 
+
+ 
+
+$chunkSize = 50;
+
+$subGroups =[System.Collections.Generic.List[PSCustomObject[]]]::new()
+
+$parts = [math]::Ceiling($Pending.Length / $chunkSize)
+
+for($i=0; $i -lt $parts; $i++){    
+
+$start = $i*$chunkSize;    
+
+$end = (($i+1)*$chunkSize)-1;    
+
+$subGroups.Add($licenseRequest[$start..$end])}
+
+Foreach($sublicenserequest in $subGroups){
+
+ 
+
+ 
+
+$licenseRequestjson = ConvertTo-Json -InputObject $sublicenserequest;
+
+$licenseRequestjson = $licenseRequestjson -replace '"','\"';
+
+qlik.exe license assignment add --add $licenseRequestjson 2>$null 
+
+}
+
+ 
+
+#>
